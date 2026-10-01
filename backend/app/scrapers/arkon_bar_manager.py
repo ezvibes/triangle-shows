@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 class ArkonBarManagerScraper(BaseScraper):
     """Parse the initial ABM calendar and follow its cursor-based pagination."""
 
-    MAX_PAGES = 20
+    # Slim's currently needs more than 20 AJAX requests to exhaust its archive.
+    # Keep a generous guard against a broken endpoint, but never treat hitting the
+    # guard as a successful (and silently incomplete) scrape.
+    MAX_PAGES = 100
 
     async def scrape(self) -> list[ScrapedEvent]:
         url = self.config.get("url", "")
@@ -73,10 +76,9 @@ class ArkonBarManagerScraper(BaseScraper):
                 cursor = next_cursor
                 last_month = data.get("last_month", last_month)
             else:
-                logger.warning(
-                    "[ABM] Stopped %s pagination after the %s-page safety limit",
-                    self.venue_slug,
-                    self.MAX_PAGES,
+                raise RuntimeError(
+                    f"ABM pagination for {self.venue_slug} exceeded the "
+                    f"{self.MAX_PAGES}-page safety limit"
                 )
 
         unique = {event.hash: event for event in events}

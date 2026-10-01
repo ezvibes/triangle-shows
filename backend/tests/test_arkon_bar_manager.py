@@ -131,3 +131,31 @@ def test_missing_calendar_is_a_failed_scrape(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ABM calendar not found"):
         asyncio.run(scraper.scrape())
+
+
+class EndlessPaginationClient(FakeAsyncClient):
+    async def post(self, url, data):
+        self.post_calls.append((url, data))
+        page_number = len(self.post_calls)
+        return FakeResponse(
+            payload={
+                "success": True,
+                "data": {
+                    "html": "",
+                    "cursor": f"cursor-{page_number}",
+                    "last_month": "2026-09",
+                    "has_more": True,
+                },
+            }
+        )
+
+
+def test_page_limit_is_a_failed_scrape(monkeypatch):
+    monkeypatch.setattr(arkon_module.httpx, "AsyncClient", EndlessPaginationClient)
+    scraper = ArkonBarManagerScraper("slims", {"url": "https://slims.example/events/"})
+    scraper.MAX_PAGES = 2
+
+    with pytest.raises(RuntimeError, match="exceeded the 2-page safety limit"):
+        asyncio.run(scraper.scrape())
+
+    assert len(EndlessPaginationClient.instance.post_calls) == 2
