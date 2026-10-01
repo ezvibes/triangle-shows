@@ -1,5 +1,6 @@
 """Scraper for the Arkon Bar Manager WordPress calendar used by Slim's."""
 
+import asyncio
 import logging
 from datetime import date
 from urllib.parse import urljoin
@@ -21,6 +22,8 @@ class ArkonBarManagerScraper(BaseScraper):
     # Keep a generous guard against a broken endpoint, but never treat hitting the
     # guard as a successful (and silently incomplete) scrape.
     MAX_PAGES = 100
+    MAX_RATE_LIMIT_RETRIES = 3
+    PAGE_DELAY_SECONDS = 0.5
 
     async def scrape(self) -> list[ScrapedEvent]:
         url = self.config.get("url", "")
@@ -47,9 +50,10 @@ class ArkonBarManagerScraper(BaseScraper):
             for _ in range(self.MAX_PAGES):
                 if not ajax_url or not cursor:
                     break
-                page = await client.post(
+                page = await self._fetch_page(
+                    client,
                     urljoin(url, ajax_url),
-                    data={
+                    {
                         "action": "abm_load_events",
                         "cursor": cursor,
                         "count": count,
@@ -57,7 +61,6 @@ class ArkonBarManagerScraper(BaseScraper):
                         "category": category,
                     },
                 )
-                page.raise_for_status()
                 payload = page.json()
                 data = payload.get("data", {}) if payload.get("success") else {}
                 if not data:
@@ -84,6 +87,26 @@ class ArkonBarManagerScraper(BaseScraper):
         unique = {event.hash: event for event in events}
         logger.info("[ABM] Found %s events for %s", len(unique), self.venue_slug)
         return list(unique.values())
+
+    async def _fetch_page(self, client: httpx.AsyncClient, url: str, data: dict):
+        """Pace pagination and retry a bounded number of rate-limited requests."""
+        for attempt in range(self.MAX_RATE_LIMIT_RETRIES + 1):
+            await asyncio.sleep(self.PAGE_DELAY_SECONDS)
+            response = await client.post(url, data=data)
+            if response.status_code != 429:
+                response.raise_for_status()
+                return response
+            if attempt == self.MAX_RATE_LIMIT_RETRIES:
+                response.raise_for_status()
+
+            retry_after = response.headers.get("Retry-After", "")
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = 2**attempt
+            await asyncio.sleep(max(delay, 1))
+
+        raise RuntimeError("ABM pagination retry loop exited unexpectedly")
 
     def _parse_events(self, soup: BeautifulSoup, base_url: str) -> list[ScrapedEvent]:
         events = []

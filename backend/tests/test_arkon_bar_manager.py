@@ -51,12 +51,15 @@ def test_requires_a_configured_url():
 
 
 class FakeResponse:
-    def __init__(self, *, text="", payload=None):
+    def __init__(self, *, text="", payload=None, status_code=200, headers=None):
         self.text = text
         self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
 
     def json(self):
         return self._payload
@@ -154,8 +157,36 @@ def test_page_limit_is_a_failed_scrape(monkeypatch):
     monkeypatch.setattr(arkon_module.httpx, "AsyncClient", EndlessPaginationClient)
     scraper = ArkonBarManagerScraper("slims", {"url": "https://slims.example/events/"})
     scraper.MAX_PAGES = 2
+    scraper.PAGE_DELAY_SECONDS = 0
 
     with pytest.raises(RuntimeError, match="exceeded the 2-page safety limit"):
         asyncio.run(scraper.scrape())
 
     assert len(EndlessPaginationClient.instance.post_calls) == 2
+
+
+class RateLimitedClient(FakeAsyncClient):
+    async def post(self, url, data):
+        self.post_calls.append((url, data))
+        if len(self.post_calls) == 1:
+            return FakeResponse(status_code=429, headers={"Retry-After": "0"})
+        return FakeResponse(
+            payload={
+                "success": True,
+                "data": {"html": "", "has_more": False},
+            }
+        )
+
+
+def test_retries_rate_limited_page(monkeypatch):
+    async def no_sleep(delay):
+        pass
+
+    monkeypatch.setattr(arkon_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(arkon_module.httpx, "AsyncClient", RateLimitedClient)
+    scraper = ArkonBarManagerScraper("slims", {"url": "https://slims.example/events/"})
+
+    events = asyncio.run(scraper.scrape())
+
+    assert len(events) == 1
+    assert len(RateLimitedClient.instance.post_calls) == 2
